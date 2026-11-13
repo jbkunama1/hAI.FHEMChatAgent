@@ -1,121 +1,83 @@
-<div align="center">
+# hAI.FHEMChatAgent
 
-# 🏠🤖 hAI.FHEMChatAgent
+Deutschsprachiger Web-Chat und Telegram-Bot für FHEM. OpenAI-kompatibles Tool Calling, MCP und optional direkte FHEMWEB-Befehle. Jede Schreibaktion benötigt eine eigene Backend-Freigabe.
 
-**Dein Zuhause. Dein Assistent.** – Deutscher Mobil-Chat und Telegram-Bot für FHEM mit KI-Tool-Calling, MCP-Anbindung und Einzelfreigabe für jede Schreibaktion.
+## Architektur
 
-[![Projektseite](https://img.shields.io/badge/Projektseite-GitHub%20Pages-78e8cc?style=for-the-badge&logo=github&logoColor=white)](https://jbkunama1.github.io/hAI.FHEMChatAgent/)
-[![Docker](https://img.shields.io/badge/Docker-amd64%20%7C%20arm64-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://github.com/jbkunama1/hAI.FHEMChatAgent/actions)
-[![Portainer](https://img.shields.io/badge/Portainer-Stack-13BEF9?style=for-the-badge&logo=portainer&logoColor=white)](portainer-stack.yml)
+Docker startet `app:app` mit genau einem Worker. `app.py` verdrahtet die Dienste und die authentifizierten API-Routen:
 
-![Python](https://img.shields.io/badge/Python-FastAPI-3776AB?logo=python&logoColor=white)
-![FHEM](https://img.shields.io/badge/FHEM-Smart%20Home-E4572E)
-![MCP](https://img.shields.io/badge/MCP-streamable--http%20%7C%20sse-8299ff)
-![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4?logo=telegram&logoColor=white)
-![SQLite](https://img.shields.io/badge/SQLite-Volume-003B57?logo=sqlite&logoColor=white)
-![Status](https://img.shields.io/badge/Status-Prototyp-ffbc78)
-[![Last Commit](https://img.shields.io/github/last-commit/jbkunama1/hAI.FHEMChatAgent?logo=github)](https://github.com/jbkunama1/hAI.FHEMChatAgent/commits/main)
+- `agent_service.py`: Planung, Batch-Abweisung, Chat und Einzelfreigaben.
+- `guard.py`: SQLite-Verläufe, Freigaben und persistente Recovery-Sperren.
+- `device_service.py`: Geräteliste, Normalisierung und 30-Sekunden-Cache.
+- `diagnostics_service.py`: MCP-Discovery und frischer Geräte-Lesezugriff teilen dieselbe Toolliste pro Diagnose. LLM-Modellliste wird separat geprüft.
+- `web_routes.py`: regulärer Router für HTML, Geräte, Menü und Diagnose.
+- `telegram_service.py`: private Chats mit User-ID-Whitelist, Geräteauswahl und Zustandsversand.
+- `index.html`: gemeinsame Weboberfläche; keine eingebettete HTML-Kopie.
 
-</div>
+`ui_app.py` und `diagnostic_app.py` bleiben reine Import-Aliasse für bestehende Startbefehle. Keine Routen werden nachträglich ersetzt; kein FunctionType-Monkeypatching.
 
----
+## Sicherheits- und Zustandsmodell
 
-## ✨ Features
+Nur die explizite Lese-Allowlist in `guard.py` läuft ohne Freigabe. Andere MCP-Tools mit `fhem_`-Präfix und alle direkten FHEMWEB-Befehle benötigen einen Vorschlag, gebunden an Benutzer, Ziel, Werkzeug und Argumente. Jeder Modell-Batch mit mehr als einem Tool-Call wird vollständig vor der Ausführung abgewiesen; alle Call-IDs erhalten eine Fehlerantwort.
 
-| | Feature | Beschreibung |
-|---|---|---|
-| 💬 | **Web-Chat** | Mobile-first, dunkles Design „Home Studio“ mit Vorlagenkarten |
-| 🤖 | **Telegram-Bot** | Inline-Menü, nur private Chats, Whitelist per User-ID |
-| 🧠 | **KI-Tool-Calling** | OpenAI-kompatible API (`OPENAI_BASE_URL`, `OPENAI_MODEL`) |
-| 🔌 | **FHEM-MCP** | Nur Tools mit Präfix `fhem_`; `streamable-http` oder `sse` |
-| 🌐 | **FHEMWEB direkt** | Optional per HTTP Basic Auth (`FHEM_URL` inkl. `/fhem`) |
-| 🔐 | **Einzelfreigabe** | `set`, `attr`, `define`, `delete`, freie Kommandos: ein Klick = ein Aufruf |
-| 🗄️ | **SQLite-Volume** | Verlauf pro Telegram-Nutzer, Freigaben laufen ab |
-| 🐳 | **Ein Container** | Portainer-Stack, GHCR-Image für amd64 und arm64 |
+Vorschlag und zugehöriger Verlauf werden gemeinsam gespeichert. `pending` wird bei Freigabe einmalig zu `consumed`, vor dem externen Aufruf. Gleichzeitig entsteht eine persistente Sperre. Erst die atomare Speicherung der Tool-Antwort und des Endzustands macht daraus `completed` oder `uncertain`. Es gibt keine Exactly-once-Garantie über SQLite und das externe Gerät: Ein Absturz nach Geräteausführung, aber vor Ergebnisspeicherung bleibt konservativ unklar und wird nicht wiederholt.
 
-## 🧭 Architektur
+- Abgelehnt: `rejected`, keine Ausführung, Tool-Antwort im Verlauf.
+- Abgelaufen: `expired`, auch ohne Button-Klick beim nächsten Zustandszugriff; Frontend aktualisiert nach Ablauf automatisch.
+- Neustart: offene Vorschläge werden `cancelled`; alte `consumed`-Einträge werden konservativ `uncertain`.
+- Fehler, Timeout, MCP-Fehlerantwort oder Abbruch einer Schreibausführung: Recovery-Sperre, keine automatische Neuplanung und kein Fallback.
+- Nach erfolgreichem Schreiben darf die anschließende Modellrunde nur lesen.
 
-```text
- 📱 Web-Chat ──┐
-               ├──▶ FastAPI (ui_app:app) ──▶ 🧠 LLM (Tool Calling)
- ✈️ Telegram ──┘            │
-                            ├──▶ 🔌 FHEM-MCP  (fhem_*)
-                            ├──▶ 🌐 FHEMWEB   (optional)
-                            └──▶ 🗄️ SQLite    (/data)
-```
+Bei Recovery bleibt Lesen möglich. Prüfe zunächst den tatsächlichen Gerätestatus. Erst `/weiter <neuer Auftrag>` hebt die Sperre bewusst auf; die neue Schreibaktion benötigt wieder eine eigene Freigabe. Ein neuer Chat löscht die Recovery-Sperre nicht. Die Statusprüfung wird nicht technisch nachgewiesen: `/weiter` ist eine ausdrückliche Benutzerbestätigung.
 
-## 🚀 Schnellstart mit Portainer
-
-1. ✅ In [Actions](https://github.com/jbkunama1/hAI.FHEMChatAgent/actions) den Lauf *Test and publish* abwarten.
-2. 🔑 Bei privatem Paket `ghcr.io` als Registry in Portainer eintragen (PAT mit `read:packages`).
-3. 📦 *Stacks → Add stack → Web editor*: Inhalt von [`portainer-stack.yml`](portainer-stack.yml) einfügen.
-4. ⚙️ Variablen nach [`.env.example`](.env.example) setzen – Pflicht: `APP_PASSWORD`, `OPENAI_API_KEY`, ggf. `MCP_API_KEY`.
-5. ▶️ Deploy und `http://SERVER:8088` öffnen.
-
-> ⚠️ Öffentlich nur hinter HTTPS-Reverse-Proxy oder VPN. Keine Schlüssel ins Repository.
+## Start und Konfiguration
 
 ```sh
 git clone https://github.com/jbkunama1/hAI.FHEMChatAgent.git
 cd hAI.FHEMChatAgent
 cp .env.example .env
-joe .env && chmod 600 .env
+# .env bearbeiten, keine Schlüssel committen
+chmod 600 .env
 docker compose up -d --build
 ```
 
-## 🔧 Konfiguration
+Für Portainer: `portainer-stack.yml` verwenden und den erfolgreichen Image-Build abwarten. Öffentlich nur hinter HTTPS-Reverse-Proxy oder VPN betreiben.
 
-| Variable | Standard | Zweck |
-|---|---|---|
-| `APP_USERNAME` / `APP_PASSWORD` | `daniel` / Pflicht | Login Web-Chat |
-| `OPENAI_BASE_URL` / `OPENAI_MODEL` | Router-URL / `all_coding` | LLM mit Function Calling |
-| `MCP_SERVER_URL` / `MCP_API_KEY` | – | FHEM-MCP-Server |
-| `MCP_AUTH_HEADER` / `MCP_AUTH_SCHEME` | `Authorization` / `Bearer` | Für `X-API-Key` Scheme leer setzen |
-| `MCP_TRANSPORT` | `streamable-http` | oder `sse` |
-| `FHEM_URL` | leer | leer = direkte Befehle aus |
-| `FHEM_VERIFY_TLS` | `true` | nur bewusst `false` |
-| `APPROVAL_TTL_SECONDS` | `120` | Gültigkeit einer Freigabe |
-| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_ALLOWED_USER_IDS` | leer | leere Liste sperrt alle |
-| `APP_IMAGE` / `APP_PORT` | GHCR latest / `8088` | Image und Hostport |
+| Variable | Standard / Bedeutung |
+|---|---|
+| `APP_USERNAME`, `APP_PASSWORD` | `daniel`, Passwort erforderlich |
+| `DATA_DIR` | `/data`, dauerhaftes SQLite-Volume |
+| `OPENAI_BASE_URL`, `OPENAI_MODEL` | `https://9router.arbeitermili.eu/v1`, `all_coding` |
+| `OPENAI_API_KEY` | Für KI-Anfragen erforderlich |
+| `MCP_SERVER_URL`, `MCP_API_KEY` | Explizit konfigurieren, keine eingebaute MCP-Zieladresse |
+| `MCP_TRANSPORT` | `streamable-http` oder `sse` |
+| `MCP_AUTH_HEADER`, `MCP_AUTH_SCHEME` | `Authorization`, `Bearer`; für X-API-Key Scheme leer setzen |
+| `FHEM_URL` | Leer deaktiviert direkte Befehle; sonst URL inklusive `/fhem` |
+| `FHEM_USERNAME`, `FHEM_PASSWORD` | Optionale FHEMWEB-Basic-Auth |
+| `FHEM_VERIFY_TLS` | `true` |
+| `APPROVAL_TTL_SECONDS` | `120`, mindestens 10 Sekunden |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_IDS` | Bot und kommagetrennte Whitelist; leer deaktiviert Polling |
+| `APP_IMAGE`, `APP_PORT` | Deployment-Variablen für Image und Hostport |
 
-## 🔐 Sicherheitsmodell
+FHEMWEB-CSRF wird nicht automatisch behandelt. HTTP-Erfolg allein bestätigt keinen Geräteerfolg. Tooldaten gelten als untrusted Daten.
 
-- 🟢 Bekannte Lese-Tools laufen direkt.
-- 🟠 Alles andere braucht eine einmalige Button-Freigabe, gebunden an Benutzer, Ziel und Argumente.
-- ⏱️ Freigaben verfallen und werden bei Neustart storniert.
-- 🚫 Keine automatische Wiederholung, kein stiller Transportwechsel.
-- ⚠️ Kein FHEM-CSRF-Handling. FHEMWEB nicht öffentlich exponieren.
+## Diagnose und Bedienung
 
-## 🧪 Tests
+Web-Gerätesuche oder Telegram `/devices Wohnzimmer` finden reale Namen. Auswahl erzeugt eine Statusabfrage, keine Schreibfreigabe. Die Weboberfläche zeigt strukturierte Fehler mit `phase` und `code`, etwa `configuration / missing_mcp_url` oder `fhem_connection / connection_refused`.
+
+`/health` ist nur Liveness: ein erfolgreicher HTTP-Aufruf bestätigt weder MCP noch FHEM noch LLM. Die explizite Verbindungsdiagnose prüft eine frische MCP-Geräteliste statt eines Cache-Erfolgs. Die LLM-Prüfung liest nur `/models`; sie beweist kein funktionierendes Tool Calling. Direkte FHEMWEB-Kommandos werden nicht zur Diagnose ausgeführt.
+
+## Migration und Deployment
+
+Vor dem ersten Start dieses Images den bestehenden Container stoppen und das gesamte Datenvolume sichern. SQLite erhält additiv die Tabelle `recovery`; bestehende `chats` und `actions` bleiben erhalten. Alte `consumed`-Datensätze können auch historisch erfolgreiche Aktionen enthalten: Da sie nicht von unterbrochenen Aktionen unterscheidbar sind, kann einmalig eine Recovery-Sperre entstehen. Gerätestatus prüfen und anschließend ausdrücklich `/weiter <neuer Auftrag>` verwenden.
+
+Kein Parallelbetrieb mehrerer App-Prozesse oder Worker auf derselben Datenbank. Erst nach geprüftem CI-Lauf und Volume-Backup das neue Image in Portainer bereitstellen. Dieses Refactoring behebt keine externe MCP-zu-FHEM-Verbindungsstörung.
+
+## Tests und Grenzen
 
 ```sh
 python -m unittest discover -s tests -v
-python -m compileall -q app.py guard.py
+python -m compileall -q *.py tests
 ```
 
-Live-MCP, FHEM, LLM-Router und Telegram sind ohne Schlüssel nicht End-to-End getestet.
-
-## 🗺️ Roadmap
-
-- [x] Web-Chat, Telegram-Menü, Einzelfreigabe
-- [ ] Audio / Sprachnachrichten
-- [ ] Dynamische Geräteliste
-- [ ] Verlaufsdiagramme
-- [ ] Mehrere Web-Benutzer
-- [ ] Löschkonzept für Verläufe
-
-## 🩺 Troubleshooting
-
-| Symptom | Ursache |
-|---|---|
-| MCP 401 | Header, Scheme oder Key |
-| KI 404 | `/v1` im Pfad prüfen |
-| Keine Tools | Transport oder `fhem_`-Namen |
-| FHEM lehnt ab | Auth, Netz, Rechte, CSRF der Zielinstanz |
-
----
-
-<div align="center">
-
-*Gebaut mit ❤️ von Daniel · hAI.FHEMChatAgent © 2026*
-
-</div>
+Neue Regressionstests decken Batch-Abweisung, Schreibfehler, Abbruch, Ablauf ohne Klick und Neustart zwischen Ausführung und Speicherung ab. HTTP-Routentests und Änderungen am Build-Workflow sind nicht Teil dieses Integrations-Commits. Ein lokaler Unit-Test ist kein CI-, Container- oder Live-FHEM-Nachweis. Live-MCP, FHEM, LLM und Telegram separat in der Zielumgebung prüfen.
